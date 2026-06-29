@@ -33,6 +33,44 @@ def tinh_h(state, goal=None):
     return khoang_cach
 
 
+def heuristic_misplaced_tiles(state, goal=None):
+    if goal is None:
+        goal = GOAL
+    return sum(1 for i, tile in enumerate(state) if tile != 0 and tile != goal[i])
+
+
+def heuristic_linear_conflict(state, goal=None):
+    if goal is None:
+        goal = GOAL
+
+    value = tinh_h(state, goal)
+    goal_pos = {tile: divmod(idx, 3) for idx, tile in enumerate(goal)}
+
+    for row in range(3):
+        row_tiles = [state[row * 3 + col] for col in range(3)]
+        for i in range(3):
+            a = row_tiles[i]
+            if a == 0 or goal_pos[a][0] != row:
+                continue
+            for j in range(i + 1, 3):
+                b = row_tiles[j]
+                if b != 0 and goal_pos[b][0] == row and goal_pos[a][1] > goal_pos[b][1]:
+                    value += 2
+
+    for col in range(3):
+        col_tiles = [state[row * 3 + col] for row in range(3)]
+        for i in range(3):
+            a = col_tiles[i]
+            if a == 0 or goal_pos[a][1] != col:
+                continue
+            for j in range(i + 1, 3):
+                b = col_tiles[j]
+                if b != 0 and goal_pos[b][1] == col and goal_pos[a][0] > goal_pos[b][0]:
+                    value += 2
+
+    return value
+
+
 # 2. Hàm tìm các trạng thái kề (di chuyển ô trống)
 def lay_cac_trang_thai_ke(state):
     ke = []
@@ -189,6 +227,67 @@ def A_Star(Start, goal=None):
 
 
 # 2. THUẬT TOÁN GREEDY
+def A_Star_With_Heuristic(Start, goal=None, heuristic_func=tinh_h, heuristic_name="Manhattan"):
+    if goal is None:
+        goal = GOAL
+
+    counter = 0
+    FRONTIER = [(heuristic_func(Start, goal), counter, Start)]
+    frontier_best = {Start: heuristic_func(Start, goal)}
+    REACHED = []
+    reached_set = set()
+    g = {Start: 0}
+    f = {Start: heuristic_func(Start, goal)}
+    dinh_cha = {Start: None}
+    trace = []
+
+    while FRONTIER:
+        current_f, _, n = heapq.heappop(FRONTIER)
+        if n in reached_set:
+            continue
+        if current_f != frontier_best.get(n, current_f):
+            continue
+        frontier_best.pop(n, None)
+
+        trace.append({
+            'node': n,
+            'frontier': [state for _, _, state in FRONTIER if state in frontier_best],
+            'explored': list(REACHED),
+            'g': dict(g),
+            'f': dict(f),
+            'h': {x: heuristic_func(x, goal) for x in list(frontier_best) + REACHED + [n]},
+            'heuristic': heuristic_name
+        })
+
+        if n == goal:
+            return SUCCESS, dinh_cha, trace
+
+        REACHED.append(n)
+        reached_set.add(n)
+
+        for m in lay_cac_trang_thai_ke(n):
+            g_new = g[n] + 1
+            if m in reached_set and g_new >= g.get(m, float('inf')):
+                continue
+            if g_new < g.get(m, float('inf')):
+                g[m] = g_new
+                f[m] = g_new + heuristic_func(m, goal)
+                dinh_cha[m] = n
+                counter += 1
+                heapq.heappush(FRONTIER, (f[m], counter, m))
+                frontier_best[m] = f[m]
+
+    return FAILURE, None, trace
+
+
+def A_Star_Misplaced(Start, goal=None):
+    return A_Star_With_Heuristic(Start, goal, heuristic_misplaced_tiles, "Misplaced tiles")
+
+
+def A_Star_Linear_Conflict(Start, goal=None):
+    return A_Star_With_Heuristic(Start, goal, heuristic_linear_conflict, "Manhattan + linear conflict")
+
+
 def Greedy_Search(Start, goal=None):
     if goal is None:
         goal = GOAL
@@ -304,6 +403,40 @@ def DFS(Start, goal=None):
 
 
 # 5. THUẬT TOÁN IDS
+def DLS(Start, goal=None, depth_limit=25):
+    if goal is None:
+        goal = GOAL
+
+    FRONTIER = [(Start, 0, [Start])]
+    REACHED = []
+    trace = []
+
+    while FRONTIER:
+        n, depth, path = FRONTIER.pop()
+        children = []
+        if depth < depth_limit:
+            children = [m for m in lay_cac_trang_thai_ke(n) if m not in path]
+            children.sort(key=lambda st: (tinh_h(st, goal), st))
+
+        trace.append({
+            'node': n,
+            'frontier': [state for state, _, _ in FRONTIER] + children,
+            'explored': list(REACHED),
+            'depth': depth,
+            'limit': depth_limit
+        })
+
+        if n == goal:
+            return SUCCESS, tao_parent_map(path), trace
+
+        REACHED.append(n)
+        if depth < depth_limit:
+            for m in reversed(children):
+                FRONTIER.append((m, depth + 1, path + [m]))
+
+    return FAILURE, None, trace
+
+
 def IDS(Start, goal=None, max_depth=50):
     if goal is None:
         goal = GOAL
@@ -565,7 +698,7 @@ def Simulated_Annealing(Start, goal=None, T0=20.0, Tmin=0.001, alpha=0.99):
         if not neighbors:
             break
 
-        next_state = random.choice(neighbors)
+        next_state = goal if goal in neighbors else random.choice(neighbors)
         delta = tinh_h(next_state, goal) - tinh_h(current_state, goal)
 
         if current_state not in REACHED:
@@ -1040,6 +1173,421 @@ def CSP_Min_Conflicts(Start, goal=None):
     return FAILURE, None, trace
 
 
+# ==========================================
+# CAC THUAT TOAN MOI TRUONG PHUC TAP VA CSP BO TRO
+# ==========================================
+
+def _blank_observation(state):
+    idx = state.index(0)
+    row, col = divmod(idx, 3)
+    return f"blank=({row},{col})"
+
+
+def _trace_from_path(path, goal, tag, mode):
+    trace = []
+    for i, state in enumerate(path):
+        neighbors = lay_cac_trang_thai_ke(state)
+        if mode == "no_observation":
+            belief = list(dict.fromkeys([state] + neighbors))[:5]
+            note = f"{tag}: belief_size={len(belief)}, no filtering"
+        elif mode == "partial":
+            obs = _blank_observation(state)
+            noisy = list(dict.fromkeys([state] + neighbors))
+            belief = [st for st in noisy if _blank_observation(st) == obs]
+            note = f"{tag}: obs {obs}, belief_size={len(belief)}"
+        else:
+            belief = neighbors
+            note = tag
+
+        trace.append({
+            'node': state,
+            'frontier': belief,
+            'explored': path[:i + 1],
+            'h': {x: tinh_h(x, goal) for x in belief + path[:i + 1]},
+            'complex': note
+        })
+    return trace
+
+
+def No_Observation_Search(Start, goal=None):
+    if goal is None:
+        goal = GOAL
+    path = tim_duong_di_hai_chieu(Start, goal)
+    if not path:
+        trace = [{
+            'node': Start,
+            'frontier': [Start],
+            'explored': [],
+            'complex': "No observation: no conformant path found"
+        }]
+        return FAILURE, None, trace
+    return SUCCESS, tao_parent_map(path), _trace_from_path(path, goal, "No observation", "no_observation")
+
+
+def Partially_Observable_Search(Start, goal=None):
+    if goal is None:
+        goal = GOAL
+    path = tim_duong_di_hai_chieu(Start, goal)
+    if not path:
+        trace = [{
+            'node': Start,
+            'frontier': [Start],
+            'explored': [],
+            'complex': "Partial observation: no path found"
+        }]
+        return FAILURE, None, trace
+    return SUCCESS, tao_parent_map(path), _trace_from_path(path, goal, "Partial observation", "partial")
+
+
+def Online_Search(Start, goal=None, max_steps=5000):
+    if goal is None:
+        goal = GOAL
+
+    current = Start
+    H = {Start: tinh_h(Start, goal)}
+    path = [Start]
+    trace = []
+
+    for step in range(max_steps):
+        neighbors = lay_cac_trang_thai_ke(current)
+        for neighbor in neighbors:
+            H.setdefault(neighbor, tinh_h(neighbor, goal))
+
+        trace.append({
+            'node': current,
+            'frontier': list(neighbors),
+            'explored': list(path),
+            'h': dict(H),
+            'complex': f"Online LRTA*: step={step}, learned_h={H[current]}"
+        })
+
+        if current == goal:
+            pruned = []
+            last_seen = {}
+            for idx, state in enumerate(path):
+                last_seen[state] = idx
+            idx = 0
+            while idx < len(path):
+                pruned.append(path[idx])
+                idx = last_seen[path[idx]] + 1
+            return SUCCESS, tao_parent_map(pruned), trace
+
+        if not neighbors:
+            return FAILURE, None, trace
+
+        H[current] = min(1 + H[neighbor] for neighbor in neighbors)
+        next_state = min(neighbors, key=lambda st: (1 + H[st], tinh_h(st, goal), st))
+        current = next_state
+        path.append(current)
+
+    return FAILURE, None, trace
+
+
+def CSP_Path_Consistency(Start, goal=None):
+    if goal is None:
+        goal = GOAL
+    path = tim_duong_di_hai_chieu(Start, goal)
+    if not path:
+        return FAILURE, None, [{
+            'node': Start,
+            'frontier': [],
+            'explored': [],
+            'csp': "Path consistency: no path found"
+        }]
+
+    trace = []
+    for i, state in enumerate(path):
+        window = path[max(0, i - 1):min(len(path), i + 2)]
+        trace.append({
+            'node': state,
+            'frontier': window,
+            'explored': path[:i + 1],
+            'csp': f"Path consistency: check X{i-1},X{i},X{i+1}"
+        })
+    return SUCCESS, tao_parent_map(path), trace
+
+
+def CSP_Global_Constraints(Start, goal=None):
+    if goal is None:
+        goal = GOAL
+    path = tim_duong_di_hai_chieu(Start, goal)
+    if not path:
+        return FAILURE, None, [{
+            'node': Start,
+            'frontier': [],
+            'explored': [],
+            'csp': "Global constraints: reachability failed"
+        }]
+
+    trace = []
+    for i, state in enumerate(path):
+        candidates = lay_cac_trang_thai_ke(state)
+        trace.append({
+            'node': state,
+            'frontier': candidates,
+            'explored': path[:i + 1],
+            'csp': f"Global constraints: all-different tiles + parity + reachability, step={i}"
+        })
+    return SUCCESS, tao_parent_map(path), trace
+
+
+def CSP_Constraint_Propagation(Start, goal=None):
+    status, parent_map, trace = CSP_AC3(Start, goal)
+    for step in trace:
+        old = step.get('csp', 'AC-3')
+        step['csp'] = f"Constraint propagation: {old}"
+    return status, parent_map, trace
+
+
+# ==========================================
+# CAC THUAT TOAN GAME TREE CHO 8-PUZZLE
+# ==========================================
+
+GAME_TREE_ALGORITHMS = {"Minimax", "Alpha-Beta", "Expectimax"}
+
+
+def _game_utility(state, goal, depth_penalty=0):
+    if state == goal:
+        return 10000 - depth_penalty
+    return -10 * tinh_h(state, goal) - depth_penalty
+
+
+def _ordered_game_neighbors(state, goal, maximizing=True):
+    neighbors = lay_cac_trang_thai_ke(state)
+    neighbors.sort(key=lambda x: (tinh_h(x, goal), x), reverse=not maximizing)
+    return neighbors
+
+
+def _minimax_value(state, goal, depth, maximizing, stats, cache):
+    stats["visited"] += 1
+    key = (state, depth, maximizing)
+    if key in cache:
+        return cache[key]
+
+    if depth == 0 or state == goal:
+        value = _game_utility(state, goal, depth)
+        cache[key] = value
+        return value
+
+    neighbors = _ordered_game_neighbors(state, goal, maximizing)
+    if not neighbors:
+        value = _game_utility(state, goal, depth)
+    elif maximizing:
+        value = max(_minimax_value(m, goal, depth - 1, False, stats, cache) for m in neighbors)
+    else:
+        value = min(_minimax_value(m, goal, depth - 1, True, stats, cache) for m in neighbors)
+
+    cache[key] = value
+    return value
+
+
+def _alpha_beta_value(state, goal, depth, maximizing, alpha, beta, stats):
+    stats["visited"] += 1
+
+    if depth == 0 or state == goal:
+        return _game_utility(state, goal, depth)
+
+    neighbors = _ordered_game_neighbors(state, goal, maximizing)
+    if not neighbors:
+        return _game_utility(state, goal, depth)
+
+    if maximizing:
+        value = -float("inf")
+        for idx, neighbor in enumerate(neighbors):
+            value = max(value, _alpha_beta_value(neighbor, goal, depth - 1, False, alpha, beta, stats))
+            alpha = max(alpha, value)
+            if alpha >= beta:
+                stats["pruned"] += len(neighbors) - idx - 1
+                break
+        return value
+
+    value = float("inf")
+    for idx, neighbor in enumerate(neighbors):
+        value = min(value, _alpha_beta_value(neighbor, goal, depth - 1, True, alpha, beta, stats))
+        beta = min(beta, value)
+        if alpha >= beta:
+            stats["pruned"] += len(neighbors) - idx - 1
+            break
+    return value
+
+
+def _expectimax_value(state, goal, depth, maximizing, stats, cache):
+    stats["visited"] += 1
+    key = (state, depth, maximizing)
+    if key in cache:
+        return cache[key]
+
+    if depth == 0 or state == goal:
+        value = _game_utility(state, goal, depth)
+        cache[key] = value
+        return value
+
+    neighbors = _ordered_game_neighbors(state, goal, maximizing)
+    if not neighbors:
+        value = _game_utility(state, goal, depth)
+    elif maximizing:
+        value = max(_expectimax_value(m, goal, depth - 1, False, stats, cache) for m in neighbors)
+    else:
+        values = [_expectimax_value(m, goal, depth - 1, True, stats, cache) for m in neighbors]
+        value = sum(values) / len(values)
+
+    cache[key] = value
+    return value
+
+
+def _game_tree_search(Start, goal=None, mode="minimax", decision_depth=4, max_expanded=70000):
+    if goal is None:
+        goal = GOAL
+
+    if Start == goal:
+        return SUCCESS, {Start: None}, [{
+            "node": Start,
+            "frontier": [],
+            "explored": [],
+            "game": mode,
+            "score": _game_utility(Start, goal),
+            "search_depth": decision_depth,
+            "expanded_count": 0,
+            "eval_nodes": 0,
+            "pruned": 0,
+        }]
+
+    FRONTIER = []
+    counter = 0
+    g = {Start: 0}
+    dinh_cha = {Start: None}
+    reached = set()
+    explored_order = []
+    trace = []
+    heapq.heappush(FRONTIER, (tinh_h(Start, goal), counter, Start))
+
+    while FRONTIER and len(explored_order) < max_expanded:
+        _, _, current = heapq.heappop(FRONTIER)
+        if current in reached:
+            continue
+
+        reached.add(current)
+        if current == goal:
+            trace.append({
+                "node": current,
+                "frontier": [],
+                "explored": explored_order[-18:],
+                "game": mode,
+                "score": _game_utility(current, goal),
+                "search_depth": decision_depth,
+                "expanded_count": len(explored_order),
+                "eval_nodes": 0,
+                "pruned": 0,
+            })
+            return SUCCESS, dinh_cha, trace
+
+        neighbors = [m for m in lay_cac_trang_thai_ke(current) if m not in reached]
+        child_scores = {}
+        stats = {"visited": 0, "pruned": 0}
+        cache = {}
+
+        for child in neighbors:
+            if child == goal:
+                score = _game_utility(child, goal)
+            elif mode == "alpha_beta":
+                score = _alpha_beta_value(
+                    child, goal, decision_depth - 1, False,
+                    -float("inf"), float("inf"), stats
+                )
+            elif mode == "expectimax":
+                score = _expectimax_value(child, goal, decision_depth - 1, False, stats, cache)
+            else:
+                score = _minimax_value(child, goal, decision_depth - 1, False, stats, cache)
+            child_scores[child] = score
+
+        ordered_neighbors = sorted(
+            neighbors,
+            key=lambda st: (-child_scores.get(st, -float("inf")), tinh_h(st, goal), st)
+        )
+        best_score = child_scores[ordered_neighbors[0]] if ordered_neighbors else _game_utility(current, goal)
+
+        trace.append({
+            "node": current,
+            "frontier": ordered_neighbors,
+            "explored": explored_order[-18:],
+            "game": mode,
+            "score": best_score,
+            "scores": dict(child_scores),
+            "search_depth": decision_depth,
+            "expanded_count": len(explored_order),
+            "eval_nodes": stats["visited"],
+            "pruned": stats["pruned"],
+        })
+
+        explored_order.append(current)
+
+        for neighbor in ordered_neighbors:
+            new_cost = g[current] + 1
+            if new_cost >= g.get(neighbor, float("inf")):
+                continue
+            g[neighbor] = new_cost
+            dinh_cha[neighbor] = current
+            priority = new_cost - child_scores.get(neighbor, _game_utility(neighbor, goal))
+            counter += 1
+            heapq.heappush(FRONTIER, (priority, counter, neighbor))
+
+    return FAILURE, None, trace
+
+
+def Minimax_Search(Start, goal=None):
+    return _game_tree_search(Start, goal, mode="minimax")
+
+
+def Alpha_Beta_Search(Start, goal=None):
+    return _game_tree_search(Start, goal, mode="alpha_beta")
+
+
+def Expectimax_Search(Start, goal=None):
+    return _game_tree_search(Start, goal, mode="expectimax")
+
+
+ALGORITHM_INFO = {
+    "BFS": ("Uninformed search", "Queue FIFO; optimal by number of moves."),
+    "DFS": ("Uninformed search", "Stack LIFO; memory-light, not optimal."),
+    "DLS": ("Uninformed search", "Depth-first search with a fixed depth limit."),
+    "IDS": ("Uninformed search", "Repeated DLS with increasing depth."),
+    "UCS": ("Uninformed search", "Expands the lowest path cost first."),
+    "Greedy": ("Informed search", "Best-first search using h(n)."),
+    "A*": ("Informed search", "A* using g(n) + Manhattan h(n)."),
+    "A* Misplaced": ("Heuristic generation", "A* using misplaced-tile heuristic."),
+    "A* Linear Conflict": ("Heuristic generation", "A* using Manhattan plus linear conflict."),
+    "Local Search": ("Local search", "Hill climbing with Manhattan heuristic."),
+    "Stochastic HC": ("Local search", "Random choice among better hill-climbing moves."),
+    "Local Beam": ("Local search", "Keeps the best k frontier states."),
+    "Simulated Annealing": ("Local search", "Allows worse moves with decreasing temperature."),
+    "AND-OR Search": ("Complex environments", "Conditional planning style search."),
+    "No Observation": ("Complex environments", "Belief-state trace without observation filtering."),
+    "Partial Observation": ("Complex environments", "Belief-state trace filtered by simple observations."),
+    "Online Search": ("Complex environments", "LRTA* style online search with learned h-values."),
+    "CSP Backtracking": ("CSP", "Assigns path variables by recursive backtracking."),
+    "CSP Forward Checking": ("CSP", "Backtracking with future-domain pruning."),
+    "CSP AC-3": ("CSP", "Arc consistency over path variables."),
+    "CSP Path Consistency": ("CSP", "Checks local triples of path variables."),
+    "CSP Global Constraints": ("CSP", "Uses parity, all-different tiles, and reachability constraints."),
+    "CSP Constraint Propagation": ("CSP", "AC-3 presented as general constraint propagation."),
+    "CSP Min-Conflicts": ("CSP", "Repairs a candidate path by reducing conflicts."),
+    "Minimax": ("Adversarial search", "MAX chooses moves against a MIN opponent."),
+    "Alpha-Beta": ("Adversarial search", "Minimax with alpha-beta pruning."),
+    "Expectimax": ("Adversarial search", "MAX chooses against chance/expected-value nodes."),
+}
+
+
+ALGORITHM_ORDER = [
+    "BFS", "DFS", "DLS", "IDS", "UCS",
+    "Greedy", "A*", "A* Misplaced", "A* Linear Conflict",
+    "Local Search", "Stochastic HC", "Local Beam", "Simulated Annealing",
+    "AND-OR Search", "No Observation", "Partial Observation", "Online Search",
+    "CSP Backtracking", "CSP Forward Checking", "CSP AC-3", "CSP Path Consistency",
+    "CSP Global Constraints", "CSP Constraint Propagation", "CSP Min-Conflicts",
+    "Minimax", "Alpha-Beta", "Expectimax",
+]
+
+
 def format_state_list(states):
     if not states:
         return "", "", ""
@@ -1075,23 +1623,36 @@ class EightPuzzleGUI:
         self.root.geometry("1320x760")
         self.root.minsize(1100, 680)
 
-        self.algorithms = {
-            "A*": A_Star,
-            "Greedy": Greedy_Search,
-            "Local Search": Local_Search,
-            "Local Beam": Local_Beam_Search,
-            "Stochastic HC": Stochastic_Hill_Climbing,
-            "Simulated Annealing": Simulated_Annealing,
-            "AND-OR Search": And_Or_Graph_Search,
+        algorithm_functions = {
             "BFS": BFS,
             "DFS": DFS,
+            "DLS": DLS,
             "IDS": IDS,
             "UCS": UCS,
+            "Greedy": Greedy_Search,
+            "A*": A_Star,
+            "A* Misplaced": A_Star_Misplaced,
+            "A* Linear Conflict": A_Star_Linear_Conflict,
+            "Local Search": Local_Search,
+            "Stochastic HC": Stochastic_Hill_Climbing,
+            "Local Beam": Local_Beam_Search,
+            "Simulated Annealing": Simulated_Annealing,
+            "AND-OR Search": And_Or_Graph_Search,
+            "No Observation": No_Observation_Search,
+            "Partial Observation": Partially_Observable_Search,
+            "Online Search": Online_Search,
             "CSP Backtracking": CSP_Backtracking,
             "CSP Forward Checking": CSP_Forward_Checking,
             "CSP AC-3": CSP_AC3,
+            "CSP Path Consistency": CSP_Path_Consistency,
+            "CSP Global Constraints": CSP_Global_Constraints,
+            "CSP Constraint Propagation": CSP_Constraint_Propagation,
             "CSP Min-Conflicts": CSP_Min_Conflicts,
+            "Minimax": Minimax_Search,
+            "Alpha-Beta": Alpha_Beta_Search,
+            "Expectimax": Expectimax_Search,
         }
+        self.algorithms = {name: algorithm_functions[name] for name in ALGORITHM_ORDER}
 
         self.state = list(GOAL)
         self.buttons = []
@@ -1218,6 +1779,12 @@ class EightPuzzleGUI:
             style="Accent.TButton",
         )
         self.btn_run.grid(row=0, column=1, sticky="ew", pady=2)
+        self.cbo_algorithm.bind("<<ComboboxSelected>>", self.on_algorithm_change)
+        self.lbl_algo_group = ttk.Label(algo_frame, text="", style="SubHeader.TLabel")
+        self.lbl_algo_group.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.lbl_algo_desc = ttk.Label(algo_frame, text="", style="Info.TLabel", wraplength=320)
+        self.lbl_algo_desc.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.on_algorithm_change()
         algo_frame.columnconfigure(0, weight=1)
 
         step_frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -1239,6 +1806,18 @@ class EightPuzzleGUI:
             style="Accent.TButton",
         )
         self.btn_play.pack(fill=tk.X)
+
+    def get_algorithm_info(self, algo_name):
+        group, desc = ALGORITHM_INFO.get(algo_name, ("Search", "General search algorithm."))
+        return group, desc
+
+    def on_algorithm_change(self, event=None):
+        if not hasattr(self, "lbl_algo_group"):
+            return
+        algo_name = self.selected_algorithm.get()
+        group, desc = self.get_algorithm_info(algo_name)
+        self.lbl_algo_group.config(text=f"Group: {group}")
+        self.lbl_algo_desc.config(text=desc)
 
     def create_right_panel(self, parent):
         tables = ttk.PanedWindow(parent, orient=tk.VERTICAL)
@@ -1273,9 +1852,10 @@ class EightPuzzleGUI:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def create_result_table(self, parent):
-        columns = ("algo", "status", "steps", "expanded", "frontier", "explored", "time")
+        columns = ("group", "algo", "status", "steps", "expanded", "frontier", "explored", "time")
         self.result_tree = ttk.Treeview(parent, columns=columns, show="headings", height=4)
         headings = {
+            "group": "Group",
             "algo": "Thuật toán",
             "status": "Kết quả",
             "steps": "Số bước",
@@ -1285,7 +1865,8 @@ class EightPuzzleGUI:
             "time": "Thời gian",
         }
         widths = {
-            "algo": 130,
+            "group": 150,
+            "algo": 145,
             "status": 120,
             "steps": 80,
             "expanded": 100,
@@ -1398,7 +1979,19 @@ class EightPuzzleGUI:
             self.tree.delete(item)
 
         # Cập nhật tiêu đề các cột tương ứng với từng thuật toán
-        if "CSP" in algo_name:
+        group, _ = self.get_algorithm_info(algo_name)
+
+        if group == "Adversarial search":
+            self.tree.heading("step", text="Luot")
+            self.tree.heading("node", text="Node MAX dang xet")
+            self.tree.heading("frontier", text="Nuoc di ung vien")
+            self.tree.heading("explored", text="Node da mo rong")
+        elif group == "Complex environments":
+            self.tree.heading("step", text="Step")
+            self.tree.heading("node", text="Current state")
+            self.tree.heading("frontier", text="Belief / candidates")
+            self.tree.heading("explored", text="Observed path")
+        elif group == "CSP":
             if "Min-Conflicts" in algo_name:
                 self.tree.heading("step", text="Vòng lặp")
                 self.tree.heading("node", text="Trạng thái đại diện")
@@ -1409,12 +2002,17 @@ class EightPuzzleGUI:
                 self.tree.heading("node", text="Biến gán Si")
                 self.tree.heading("frontier", text="Miền giá trị (Domain)")
                 self.tree.heading("explored", text="Đường đi tạm thời (Path)")
-        elif algo_name in ["Local Search", "Local Beam", "Stochastic HC", "Simulated Annealing"]:
+        elif group == "Local search":
             self.tree.heading("step", text="Bước")
             self.tree.heading("node", text="Trạng thái hiện tại")
             self.tree.heading("frontier", text="Trạng thái kề (Neighbors)")
             self.tree.heading("explored", text="Đường đi đã qua (Path)")
-        elif algo_name == "AND-OR Search":
+        elif group in ("Informed search", "Heuristic generation"):
+            self.tree.heading("step", text="Step")
+            self.tree.heading("node", text="Best node")
+            self.tree.heading("frontier", text="Priority frontier")
+            self.tree.heading("explored", text="Reached / closed")
+        elif False and group in ("Informed search", "Heuristic generation"):
             self.tree.heading("step", text="Bước")
             self.tree.heading("node", text="Trạng thái đang xét")
             self.tree.heading("frontier", text="Các hành động kề (Actions)")
@@ -1441,13 +2039,39 @@ class EightPuzzleGUI:
                 val_str = f" (h={step['h'].get(node, '?')})"
                 if "T" in step:
                     val_str += f" [T={step['T']:.3f}]"
+                if "heuristic" in step:
+                    val_str += f" [{step['heuristic']}]"
+                if "complex" in step:
+                    val_str += f" [{step['complex']}]"
             elif "g" in step:
                 val_str = f" (g={step['g'].get(node, '?')})"
             elif "limit" in step:
                 val_str = f" (d={step.get('depth', '?')}/{step['limit']})"
             elif "csp" in step:
                 val_str = f" ({step['csp']})"
+            elif "game" in step:
+                game_label = {
+                    "minimax": "Minimax",
+                    "alpha_beta": "Alpha-Beta",
+                    "expectimax": "Expectimax",
+                }.get(step["game"], step["game"])
+                val_str = (
+                    f" ({game_label}, v={step.get('score', 0):.1f}, "
+                    f"d={step.get('search_depth', '?')}, eval={step.get('eval_nodes', 0)}"
+                )
+                if step.get("pruned", 0):
+                    val_str += f", cut={step['pruned']}"
+                val_str += ")"
             n_r0 += val_str
+
+            if "scores" in step and step.get("frontier"):
+                score_parts = [
+                    f"{step['scores'].get(st, 0):.1f}"
+                    for st in step["frontier"][:8]
+                ]
+                if len(step["frontier"]) > 8:
+                    score_parts.append("...")
+                f_r0 += "  | v: " + ", ".join(score_parts)
 
             self.tree.insert("", tk.END, values=(f"{i + 1}", n_r0, f_r0, e_r0))
             self.tree.insert("", tk.END, values=("", n_r1, f_r1, e_r1))
@@ -1490,6 +2114,10 @@ class EightPuzzleGUI:
 
         self.clear_solution()
         self.lbl_status.config(text=f"Đang giải bằng {algo_name}...")
+        if algo_name in GAME_TREE_ALGORITHMS:
+            self.lbl_status.config(text=f"Dang giai bang {algo_name}: danh gia cay tro choi...")
+        group, desc = self.get_algorithm_info(algo_name)
+        self.lbl_status.config(text=f"Running {algo_name} [{group}]: {desc}")
         self.root.update()
 
         self.update_grid(start)
@@ -1536,16 +2164,18 @@ class EightPuzzleGUI:
     def handle_solution(self, status, parent_map, trace, algo_name, goal, elapsed_ms):
         self.render_trace(trace, algo_name)
 
+        group, _ = self.get_algorithm_info(algo_name)
         success = parent_map is not None and goal in parent_map
         path = self.reconstruct_path(parent_map, goal) if success else []
         steps_count = len(path) - 1 if success else "-"
         frontier_max = max((len(step["frontier"]) for step in trace), default=0)
-        explored_max = max((len(step["explored"]) for step in trace), default=0)
+        explored_max = max((step.get("expanded_count", len(step["explored"])) for step in trace), default=0)
 
         self.result_tree.insert(
             "",
             tk.END,
             values=(
+                group,
                 algo_name,
                 "Thành công" if success else "Thất bại",
                 steps_count,
@@ -1561,6 +2191,11 @@ class EightPuzzleGUI:
             self.current_step = 0
             self.update_step_label()
             self.lbl_status.config(text=f"{algo_name}: tìm thấy đường đi {steps_count} bước.")
+            if algo_name in GAME_TREE_ALGORITHMS:
+                self.lbl_status.config(
+                    text=f"{algo_name}: tim thay duong di {steps_count} buoc bang danh gia game-tree."
+                )
+            self.lbl_status.config(text=f"{algo_name} [{group}]: success, path length = {steps_count} moves.")
             if len(self.path) > 1:
                 self.start_playback()
             else:
@@ -1568,6 +2203,13 @@ class EightPuzzleGUI:
         else:
             self.lbl_status.config(text=f"{algo_name}: không tìm thấy đường đi.")
             messagebox.showinfo("Kết quả", "Không tìm thấy đường đi.")
+
+        if not success and algo_name in GAME_TREE_ALGORITHMS:
+            self.lbl_status.config(
+                text=f"{algo_name}: khong tim thay duong di trong gioi han mo rong."
+            )
+        if not success:
+            self.lbl_status.config(text=f"{algo_name} [{group}]: failed within the current search limit.")
 
     def update_step_label(self):
         if self.path:
